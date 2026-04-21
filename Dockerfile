@@ -2,7 +2,6 @@
 FROM node:20-bookworm-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
-# Pake --legacy-peer-deps buat ngehindari konflik React 19 di Next 15
 RUN npm install --legacy-peer-deps
 
 # STAGE 2: Build the app
@@ -19,7 +18,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
 
-# 1. Install sistem dependencies (Vulkan, Mesa GL, wget, unzip)
+# 1. Install sistem dependencies (Lengkap untuk AI Engine)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libvulkan1 \
     ca-certificates \
@@ -28,22 +27,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     libgl1-mesa-glx \
     libgl1-mesa-dri \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Setup AI Engine (Real-ESRGAN)
-# Kita unzip langsung di /app, berdasarkan log sebelumnya unzip tidak bikin subfolder
 RUN wget https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-ubuntu.zip \
     && unzip realesrgan-ncnn-vulkan-20220424-ubuntu.zip \
     && chmod +x realesrgan-ncnn-vulkan \
     && rm realesrgan-ncnn-vulkan-20220424-ubuntu.zip
 
-# 3. Copy hasil build dari stage sebelumnya
+# 3. Copy hasil build
 COPY --from=build /app/.next ./.next
 COPY --from=build /app/public ./public
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/node_modules ./node_modules
 
-# 4. Buat folder temporary untuk proses gambar (PENTING)
+# 4. Buat folder temporary untuk proses gambar
 RUN mkdir -p /app/.tmp && chmod 777 /app/.tmp
 
 EXPOSE 3000
