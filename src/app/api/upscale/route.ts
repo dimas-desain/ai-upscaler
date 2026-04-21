@@ -7,7 +7,6 @@ import { NextRequest, NextResponse } from "next/server";
 export const runtime = "nodejs";
 
 const MAX_BYTES = 10 * 1024 * 1024; // 10MB
-// Gunakan konstanta path agar konsisten dengan mount Coolify
 const TMP_ROOT = process.env.UPSCALER_TMP_DIR ?? "/app/.tmp";
 
 function getExtFromMime(mime: string) {
@@ -22,10 +21,13 @@ async function runCommand(
   command: string,
   args: string[],
   timeoutMs: number,
+  cwd: string // Tambahkan CWD agar binary bisa nemu folder models
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return await new Promise((resolve, reject) => {
-    // Gunakan shell: true jika running di windows lokal, false untuk linux/docker
-    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, args, { 
+      stdio: ["ignore", "pipe", "pipe"],
+      cwd: cwd // Eksekusi dari folder /app
+    });
 
     let stdout = "";
     let stderr = "";
@@ -78,44 +80,50 @@ export async function POST(request: NextRequest) {
     const inputPath = path.join(jobDir, `input.${ext}`);
     const outputPath = path.join(jobDir, "output.png");
 
-    // Write file ke disk
+    // Simpan file asli
     const buf = Buffer.from(await file.arrayBuffer());
     await writeFile(inputPath, buf);
 
-    // Konfigurasi Engine (Sesuaikan dengan path di Dockerfile Coolify)
-    // Di dalam POST function route.ts
-    const bin = "/app/realesrgan-ncnn-vulkan"; // Sesuaikan dengan lokasi di Docker
-    const model = process.env.REAL_ESRGAN_MODEL ?? "realesrgan-x4plus";
-    const timeoutMs = 180000; // Kasih 3 menit (VPS CPU biasanya agak pelan)
+    // Konfigurasi Path
+    const bin = "/app/realesrgan-ncnn-vulkan";
+    const modelName = process.env.REAL_ESRGAN_MODEL ?? "realesrgan-x4plus";
+    const timeoutMs = 180000; 
 
-    const args = ["-i", inputPath, "-o", outputPath, "-n", model, "-s", String(scale)];
+    // PENTING: Gunakan path model absolut atau pastikan CWD benar
+    const args = [
+      "-i", inputPath, 
+      "-o", outputPath, 
+      "-n", modelName, 
+      "-s", String(scale),
+      "-f", "png" // Force output png agar konsisten
+    ];
 
-    // Eksekusi AI
-    const result = await runCommand(bin, args, timeoutMs);
+    // Eksekusi AI dari folder /app (biar dia nemu folder /app/models)
+    const result = await runCommand(bin, args, timeoutMs, "/app");
 
     if (result.code !== 0) {
-      console.error("AI Error:", result.stderr);
+      console.error("AI Error Stderr:", result.stderr);
       return NextResponse.json({ 
-        error: "Gagal memproses gambar.", 
+        error: "AI Engine gagal memproses gambar.", 
         details: result.stderr 
       }, { status: 500 });
     }
 
     const out = await readFile(outputPath);
     
-    // Kirim hasil
     return new Response(out, {
       status: 200,
       headers: {
         "Content-Type": "image/png",
         "Content-Disposition": `attachment; filename="upscaled-${jobId}.png"`,
+        "Cache-Control": "no-store"
       },
     });
 
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   } finally {
-    // Cleanup folder job spesifik
+    // Cleanup folder job
     rm(jobDir, { recursive: true, force: true }).catch(() => {});
   }
 }
