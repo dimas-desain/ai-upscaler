@@ -83,7 +83,8 @@ export async function POST(request: NextRequest) {
     await writeFile(inputPath, buf);
 
     // Konfigurasi Engine (Sesuaikan dengan path di Dockerfile Coolify)
-    const bin = process.env.REAL_ESRGAN_PATH ?? "/app/realesrgan-ncnn-vulkan";
+    // Di dalam POST function route.ts
+    const bin = "/app/realesrgan-ncnn-vulkan"; // Sesuaikan dengan lokasi di Docker
     const model = process.env.REAL_ESRGAN_MODEL ?? "realesrgan-x4plus";
     const timeoutMs = 180000; // Kasih 3 menit (VPS CPU biasanya agak pelan)
 
