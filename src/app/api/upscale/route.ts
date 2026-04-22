@@ -28,17 +28,14 @@ export async function POST(request: NextRequest) {
 
     // 3. Eksekusi Processing (Resize + Sharpen)
     const processedBuffer = await image
-      .resize({
-        width: metadata.width * scale,
-        kernel: sharp.kernel.lanczos3, // Algoritma resize terbaik non-AI
-      })
-      .sharpen({
-        sigma: 1.5,   // Level ketajaman (HD Vibes)
-        flat: 1.0,    // Mempertajam area datar
-        jagged: 2.0   // Mengurangi noise di pinggiran
-      })
-      .png({ quality: 90 }) // Output PNG biar gak pecah
-      .toBuffer();
+  .resize({
+    width: metadata.width * scale,
+    kernel: sharp.kernel.lanczos3,
+  })
+  // Kirim argumen secara langsung: sigma, flat, jagged
+  .sharpen(1.5, 1.0, 2.0) 
+  .png({ quality: 90 })
+  .toBuffer();
 
     // 4. Kirim Response
     return new Response(processedBuffer, {
