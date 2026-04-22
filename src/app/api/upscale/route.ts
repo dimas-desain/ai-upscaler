@@ -86,16 +86,17 @@ export async function POST(request: NextRequest) {
 
     // Konfigurasi Path
     const bin = "/app/realesrgan-ncnn-vulkan";
-    const modelName = process.env.REAL_ESRGAN_MODEL ?? "realesrgan-x4plus";
-    const timeoutMs = 180000; 
+    const model = process.env.REAL_ESRGAN_MODEL ?? "realesrgan-x4plus";
+    const timeoutMs = 180000;
 
     // PENTING: Gunakan path model absolut atau pastikan CWD benar
     const args = [
       "-i", inputPath, 
       "-o", outputPath, 
-      "-n", modelName, 
+      "-n", model, 
       "-s", String(scale),
-      "-f", "png" // Force output png agar konsisten
+      "-g", "-1", // <--- TAMBAHKAN INI (WAJIB!)
+      "-f", "png"
     ];
 
     // Eksekusi AI dari folder /app (biar dia nemu folder /app/models)
