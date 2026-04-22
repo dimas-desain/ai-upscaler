@@ -2,32 +2,21 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { NextRequest, NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
 const MAX_BYTES = 10 * 1024 * 1024; // 10MB
-const TMP_ROOT = process.env.UPSCALER_TMP_DIR ?? "/app/.tmp";
-
-function getExtFromMime(mime: string) {
-  const m = mime.toLowerCase();
-  if (m === "image/png") return "png";
-  if (m === "image/jpeg" || m === "image/jpg") return "jpg";
-  if (m === "image/webp") return "webp";
-  return null;
-}
+let isProcessing = false;
 
 async function runCommand(
   command: string,
   args: string[],
   timeoutMs: number,
-  cwd: string // Tambahkan CWD agar binary bisa nemu folder models
+  cwd: string
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return await new Promise((resolve, reject) => {
-    const child = spawn(command, args, { 
-      stdio: ["ignore", "pipe", "pipe"],
-      cwd: cwd // Eksekusi dari folder /app
-    });
+    // spawn dijalankan dengan cwd agar binary bisa menemukan folder /models
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], cwd });
 
     let stdout = "";
     let stderr = "";
@@ -36,7 +25,7 @@ async function runCommand(
 
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
-      reject(new Error(`Timeout: Proses AI memakan waktu lebih dari ${timeoutMs / 1000} detik.`));
+      reject(new Error(`Process timeout setelah ${timeoutMs}ms`));
     }, timeoutMs);
 
     child.on("error", (err) => {
@@ -51,63 +40,56 @@ async function runCommand(
   });
 }
 
-export async function POST(request: NextRequest) {
+export async function POST(request: Request) {
+  if (isProcessing) {
+    return Response.json({ error: "Server sibuk, coba lagi sebentar lagi." }, { status: 429 });
+  }
+
+  isProcessing = true;
   const jobId = randomUUID();
-  const jobDir = path.join(TMP_ROOT, jobId);
+  const tmpRoot = "/app/.tmp"; // Path mount Coolify
+  const jobDir = path.join(tmpRoot, jobId);
 
   try {
     const form = await request.formData();
     const file = form.get("file");
-    const scaleRaw = form.get("scale")?.toString();
+    const scale = form.get("scale")?.toString() || "4";
 
     if (!(file instanceof File)) {
-      return NextResponse.json({ error: "File tidak ditemukan." }, { status: 400 });
-    }
-
-    const ext = getExtFromMime(file.type);
-    if (!ext) {
-      return NextResponse.json({ error: `Format ${file.type} tidak didukung.` }, { status: 400 });
+      return Response.json({ error: "File tidak valid." }, { status: 400 });
     }
 
     if (file.size > MAX_BYTES) {
-      return NextResponse.json({ error: "File terlalu besar (Maks 10MB)." }, { status: 413 });
+      return Response.json({ error: "File terlalu besar (Max 10MB)." }, { status: 413 });
     }
 
-    const scale = Number(scaleRaw ?? "4");
-    
-    // Setup Folder & Path
     await mkdir(jobDir, { recursive: true });
-    const inputPath = path.join(jobDir, `input.${ext}`);
+    
+    const inputPath = path.join(jobDir, "input.png");
     const outputPath = path.join(jobDir, "output.png");
 
-    // Simpan file asli
     const buf = Buffer.from(await file.arrayBuffer());
     await writeFile(inputPath, buf);
 
-    // Konfigurasi Path
     const bin = "/app/realesrgan-ncnn-vulkan";
     const model = process.env.REAL_ESRGAN_MODEL ?? "realesrgan-x4plus";
-    const timeoutMs = 180000;
+    const timeoutMs = 180000; // 3 menit
 
-    // PENTING: Gunakan path model absolut atau pastikan CWD benar
+    // FLAG KRUSIAL: -g -1 memaksa penggunaan CPU
     const args = [
-      "-i", inputPath, 
-      "-o", outputPath, 
-      "-n", model, 
-      "-s", String(scale),
-      "-g", "-1", // <--- TAMBAHKAN INI (WAJIB!)
+      "-i", inputPath,
+      "-o", outputPath,
+      "-n", model,
+      "-s", scale,
+      "-g", "-1", 
       "-f", "png"
     ];
 
-    // Eksekusi AI dari folder /app (biar dia nemu folder /app/models)
     const result = await runCommand(bin, args, timeoutMs, "/app");
 
     if (result.code !== 0) {
-      console.error("AI Error Stderr:", result.stderr);
-      return NextResponse.json({ 
-        error: "AI Engine gagal memproses gambar.", 
-        details: result.stderr 
-      }, { status: 500 });
+      console.error("AI Engine Error:", result.stderr);
+      return Response.json({ error: "AI Gagal memproses.", detail: result.stderr }, { status: 500 });
     }
 
     const out = await readFile(outputPath);
@@ -117,14 +99,15 @@ export async function POST(request: NextRequest) {
       headers: {
         "Content-Type": "image/png",
         "Content-Disposition": `attachment; filename="upscaled-${jobId}.png"`,
-        "Cache-Control": "no-store"
       },
     });
 
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    console.error("Route Error:", err);
+    return Response.json({ error: err.message }, { status: 500 });
   } finally {
     // Cleanup folder job
     rm(jobDir, { recursive: true, force: true }).catch(() => {});
+    isProcessing = false;
   }
 }
