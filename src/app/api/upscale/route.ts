@@ -1,113 +1,57 @@
-import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import path from "node:path";
+import sharp from "sharp";
+import { NextRequest, NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
 const MAX_BYTES = 10 * 1024 * 1024; // 10MB
-let isProcessing = false;
 
-async function runCommand(
-  command: string,
-  args: string[],
-  timeoutMs: number,
-  cwd: string
-): Promise<{ code: number; stdout: string; stderr: string }> {
-  return await new Promise((resolve, reject) => {
-    // spawn dijalankan dengan cwd agar binary bisa menemukan folder /models
-    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], cwd });
-
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (d) => (stdout += String(d)));
-    child.stderr.on("data", (d) => (stderr += String(d)));
-
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      reject(new Error(`Process timeout setelah ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
-
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ code: code ?? 1, stdout, stderr });
-    });
-  });
-}
-
-export async function POST(request: Request) {
-  if (isProcessing) {
-    return Response.json({ error: "Server sibuk, coba lagi sebentar lagi." }, { status: 429 });
-  }
-
-  isProcessing = true;
-  const jobId = randomUUID();
-  const tmpRoot = "/app/.tmp"; // Path mount Coolify
-  const jobDir = path.join(tmpRoot, jobId);
-
+export async function POST(request: NextRequest) {
   try {
-    const form = await request.formData();
-    const file = form.get("file");
-    const scale = form.get("scale")?.toString() || "4";
+    const formData = await request.formData();
+    const file = formData.get("file") as File;
+    const scale = Number(formData.get("scale") || "2"); // Default 2x biar gak pecah banget
 
-    if (!(file instanceof File)) {
-      return Response.json({ error: "File tidak valid." }, { status: 400 });
+    if (!file) return NextResponse.json({ error: "File missing" }, { status: 400 });
+    if (file.size > MAX_BYTES) return NextResponse.json({ error: "File too large" }, { status: 413 });
+
+    // 1. Convert file ke Buffer
+    const arrayBuffer = await file.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    // 2. Ambil metadata gambar asli (buat hitung resolusi baru)
+    const image = sharp(buffer);
+    const metadata = await image.metadata();
+
+    if (!metadata.width || !metadata.height) {
+      throw new Error("Gagal membaca dimensi gambar");
     }
 
-    if (file.size > MAX_BYTES) {
-      return Response.json({ error: "File terlalu besar (Max 10MB)." }, { status: 413 });
-    }
+    // 3. Eksekusi Processing (Resize + Sharpen)
+    const processedBuffer = await image
+      .resize({
+        width: metadata.width * scale,
+        kernel: sharp.kernel.lanczos3, // Algoritma resize terbaik non-AI
+      })
+      .sharpen({
+        sigma: 1.5,   // Level ketajaman (HD Vibes)
+        flat: 1.0,    // Mempertajam area datar
+        jagged: 2.0   // Mengurangi noise di pinggiran
+      })
+      .png({ quality: 90 }) // Output PNG biar gak pecah
+      .toBuffer();
 
-    await mkdir(jobDir, { recursive: true });
-    
-    const inputPath = path.join(jobDir, "input.png");
-    const outputPath = path.join(jobDir, "output.png");
-
-    const buf = Buffer.from(await file.arrayBuffer());
-    await writeFile(inputPath, buf);
-
-    const bin = "/app/realesrgan-ncnn-vulkan";
-    const model = process.env.REAL_ESRGAN_MODEL ?? "realesrgan-x4plus";
-    const timeoutMs = 180000; // 3 menit
-
-    // FLAG KRUSIAL: -g -1 memaksa penggunaan CPU
-    const args = [
-      "-i", inputPath,
-      "-o", outputPath,
-      "-n", model,
-      "-s", scale,
-      "-g", "-1", 
-      "-f", "png"
-    ];
-
-    const result = await runCommand(bin, args, timeoutMs, "/app");
-
-    if (result.code !== 0) {
-      console.error("AI Engine Error:", result.stderr);
-      return Response.json({ error: "AI Gagal memproses.", detail: result.stderr }, { status: 500 });
-    }
-
-    const out = await readFile(outputPath);
-    
-    return new Response(out, {
+    // 4. Kirim Response
+    return new Response(processedBuffer, {
       status: 200,
       headers: {
         "Content-Type": "image/png",
-        "Content-Disposition": `attachment; filename="upscaled-${jobId}.png"`,
+        "Cache-Control": "no-store",
+        "Content-Disposition": `attachment; filename="enhanced.png"`,
       },
     });
 
-  } catch (err: any) {
-    console.error("Route Error:", err);
-    return Response.json({ error: err.message }, { status: 500 });
-  } finally {
-    // Cleanup folder job
-    rm(jobDir, { recursive: true, force: true }).catch(() => {});
-    isProcessing = false;
+  } catch (error: any) {
+    console.error("Sharp Error:", error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
